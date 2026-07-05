@@ -70,7 +70,8 @@ async function loadCandidates(): Promise<void> {
   const timer = setTimeout(() => ctl.abort(), 5000);
   try {
     const res = await fetch(PROXY_API, { signal: ctl.signal });
-    const all: any[] = await res.json();
+    const data = await res.json();
+    const all: any[] = Array.isArray(data) ? data : [];
     candidates = all
       .filter((p) => p.quality_grade === 'S' && p.status === 'active')
       .sort((a, b) => a.latency - b.latency);
