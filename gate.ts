@@ -331,9 +331,17 @@ async function dispatch(
     const { status, body: respBody } = await doHttps(path, method, headers, body, agent);
     try { agent.destroy(); } catch {}
 
-    // 上游 5xx：代理没毛病，不丢弃，直接返回
-    if (status >= 500) {
-      return new Response(respBody, { status, headers: { 'content-type': 'application/json; charset=utf-8' } });
+    // 上游 429 或 5xx：尝试下一个代理
+    if (status === 429 || status >= 500) {
+      console.warn(`[重试] ${slot.addr} 返回 ${status}，尝试下一个代理`);
+      if (retry < MAX_RETRIES) {
+        return dispatch(path, method, headers, body, retry + 1, triedAddrs);
+      }
+      // 所有代理都失败，尝试 ZenProxy
+      if (ZENPROXY_KEY) {
+        console.log(`[回退] 重试耗尽 → ZenProxy relay`);
+        return proxyViaRelay(path, method, headers, body);
+      }
     }
 
     return new Response(respBody, { status, headers: { 'content-type': 'application/json; charset=utf-8' } });
