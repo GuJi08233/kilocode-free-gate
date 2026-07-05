@@ -1,11 +1,11 @@
 #!/usr/bin/env bun
 
 /**
- * kilocode-free-gate — Kilo 免费模型反代网关
+ * kilocode-free-gate — 双 IP 轮换反代网关
  *
- * 维持 2 个可用代理轮换使用，失败重试 3 次后换 IP
+ * 维持 2 个可用代理轮换使用，失败重试 3 次后换 IP，全部失败走 ZenProxy
  * 候选池每 5 分钟刷新一次，新代理先探活再启用
- * 兼容 OpenAI 和 Anthropic 格式
+ * 兼容 OpenAI 格式
  *
  * 使用:
  *   bun run gate.ts
@@ -29,14 +29,13 @@ interface Slot {
   proto: 'http' | 'socks5';
 }
 
-const PROXY_API = process.env.PROXY_API || 'https://proxy.amux.ai/api/proxies';
-const PROXY_API_2 = process.env.PROXY_API_2 || '';  // 第二个代理池
+const PROXY_API = 'https://proxy.amux.ai/api/proxies';
 const UPSTREAM = 'https://api.kilo.ai/api/gateway';
 const PORT = parseInt(process.env.PORT || '13339');
 const MAX_RETRIES = 3;
 const TIMEOUT = 120000;
 const STREAM_TIMEOUT = 300000;
-const SLOT_COUNT = parseInt(process.env.SLOT_COUNT || '4');  // 轮换代理数，默认4个
+const SLOT_COUNT = 2;                               // 轮换代理数
 const PROXY_PROBE_TIMEOUT = parseInt(process.env.PROXY_PROBE_TIMEOUT || '8000');
 const PROXY_REFRESH_MS = parseInt(process.env.PROXY_REFRESH_MS || '300000');
 
@@ -66,36 +65,13 @@ const FORWARD = [
 async function loadCandidates(): Promise<void> {
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), 5000);
-
-  const apis = [PROXY_API];
-  if (PROXY_API_2) apis.push(PROXY_API_2);
-
   try {
-    const results = await Promise.all(apis.map(async (api) => {
-      try {
-        const res = await fetch(api, { signal: ctl.signal });
-        const all: any[] = await res.json();
-        return all.filter((p) => p.quality_grade === 'S' && p.status === 'active');
-      } catch (e: any) {
-        console.warn(`[选] ${api} failed: ${e.message}`);
-        return [];
-      }
-    }));
-
-    // 合并去重
-    const seen = new Set<string>();
-    const merged: ProxyItem[] = [];
-    for (const items of results) {
-      for (const item of items) {
-        if (!seen.has(item.address)) {
-          seen.add(item.address);
-          merged.push(item);
-        }
-      }
-    }
-
-    candidates = merged.sort((a, b) => a.latency - b.latency);
-    console.log(`[选] ${candidates.length} S-grade candidates (from ${apis.length} pools)`);
+    const res = await fetch(PROXY_API, { signal: ctl.signal });
+    const all: any[] = await res.json();
+    candidates = all
+      .filter((p) => p.quality_grade === 'S' && p.status === 'active')
+      .sort((a, b) => a.latency - b.latency);
+    console.log(`[选] ${candidates.length} S-grade candidates`);
   } catch (e: any) {
     candidates = [];
     console.warn(`[选] load failed: ${e.message}`);
@@ -399,19 +375,8 @@ async function proxyViaRelay(
 // ––––––––––––––––––––––––––––––––––––––––––––––––––––
 
 function normalize(raw: string): string | null {
-  // 支持 OpenAI 格式: /openai/v1/xxx 或 /v1/xxx
-  const m1 = raw.match(/^\/openai(\/v1\/.+)$/);
-  if (m1) return m1[1];
-
-  // 支持直接格式: /v1/xxx
-  const m2 = raw.match(/^(\/v1\/.+)$/);
-  if (m2) return m2[1];
-
-  // 支持 Anthropic 格式: /anthropic/v1/xxx
-  const m3 = raw.match(/^\/anthropic(\/v1\/.+)$/);
-  if (m3) return m3[1];
-
-  return null;
+  const m = raw.match(/^\/(openai|anthropic)(\/v1\/.+)$/);
+  return m ? m[2] : null;
 }
 
 // ––––––––––––––––––––––––––––––––––––––––––––––––––––
@@ -420,8 +385,6 @@ function normalize(raw: string): string | null {
 
 console.log(`[门] http://localhost:${PORT}`);
 console.log(`[门] OpenAI:    /openai/v1/chat/completions | /openai/v1/models`);
-console.log(`[门] 直接:      /v1/chat/completions | /v1/models`);
-console.log(`[门] 代理池:    ${PROXY_API_2 ? '2 个' : '1 个'}`);
 console.log(`[门] 备用:      ${ZENPROXY_KEY ? `ZenProxy relay 已启用 (${ZENPROXY_RELAY})` : '未配置 ZENPROXY_KEY'}`);
 console.log(`[门] 策略:      ${SLOT_COUNT} slot 轮换, MAX_RETRIES=${MAX_RETRIES}`);
 
@@ -437,21 +400,7 @@ Bun.serve({
     if (!pathname) {
       if (raw === '/' || raw === '/v1') {
         return new Response(
-          JSON.stringify({
-            status: 'ok',
-            service: 'kilocode-free-gate',
-            upstream: UPSTREAM,
-            slots: slots.map((s) => s.addr),
-            free_models: [
-              'kilo-auto/free',
-              'nvidia/nemotron-3-ultra-550b-a55b:free',
-              'nvidia/nemotron-3-super-120b-a12b:free',
-              'poolside/laguna-m.1:free',
-              'poolside/laguna-xs.2:free',
-              'stepfun/step-3.7-flash:free',
-              'nex-agi/nex-n2-pro:free',
-            ],
-          }),
+          JSON.stringify({ status: 'ok', slots: slots.map((s) => s.addr) }),
           { headers: { 'content-type': 'application/json' } },
         );
       }
@@ -459,19 +408,7 @@ Bun.serve({
     }
 
     if (pathname === '/v1/models' && method === 'GET') {
-      // 返回 Kilo 免费模型列表
-      return new Response(JSON.stringify({
-        object: 'list',
-        data: [
-          { id: 'kilo-auto/free', object: 'model', owned_by: 'kilo' },
-          { id: 'nvidia/nemotron-3-ultra-550b-a55b:free', object: 'model', owned_by: 'nvidia' },
-          { id: 'nvidia/nemotron-3-super-120b-a12b:free', object: 'model', owned_by: 'nvidia' },
-          { id: 'poolside/laguna-m.1:free', object: 'model', owned_by: 'poolside' },
-          { id: 'poolside/laguna-xs.2:free', object: 'model', owned_by: 'poolside' },
-          { id: 'stepfun/step-3.7-flash:free', object: 'model', owned_by: 'stepfun' },
-          { id: 'nex-agi/nex-n2-pro:free', object: 'model', owned_by: 'nex-agi' },
-        ],
-      }), { headers: { 'content-type': 'application/json' } });
+      return dispatch(pathname + search, 'GET', collectHeaders(req));
     }
 
     if ((pathname === '/v1/chat/completions' || pathname === '/v1/messages') && method === 'POST') {

@@ -9,11 +9,6 @@ services:
       - "13339:13339"
     environment:
       - PORT=13339
-      # 代理池配置
-      - PROXY_API=https://proxy.amux.ai/api/proxies
-      # - PROXY_API_2=https://your-second-pool/api/proxies
-      # 轮换代理数量（增加可提高并发）
-      # - SLOT_COUNT=4
       # ZenProxy 备用中继（可选，全部代理失败时降级使用）
       # - ZENPROXY_KEY=你的密钥
       # - ZENPROXY_RELAY=https://zenproxy.top/api/relay
