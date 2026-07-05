@@ -116,13 +116,10 @@ async function probe(item: ProxyItem): Promise<{ ok: boolean; latencyMs?: number
   try {
     const result = await new Promise<{ status: number }>((resolve, reject) => {
       const req = https.request(
-        `${UPSTREAM}/chat/completions`,
+        `${UPSTREAM}/models`,  // 改为 GET /models 探活，轻量不易触发限流
         {
-          method: 'POST',
-          headers: {
-            'accept': 'application/json',
-            'content-type': 'application/json',
-          },
+          method: 'GET',
+          headers: { accept: 'application/json' },
           agent,
           rejectUnauthorized: false,
         },
@@ -137,12 +134,6 @@ async function probe(item: ProxyItem): Promise<{ ok: boolean; latencyMs?: number
       );
       req.on('error', (e) => { if (timer) clearTimeout(timer); reject(e); });
       timer = setTimeout(() => { req.destroy(new Error('probe-timeout')); reject(new Error('probe-timeout')); }, PROXY_PROBE_TIMEOUT);
-      // 发送一个最小请求来探活
-      req.write(JSON.stringify({
-        model: 'kilo-auto/free',
-        messages: [{ role: 'user', content: 'hi' }],
-        max_tokens: 1,
-      }));
       req.end();
     });
     return { ok: result.status >= 200 && result.status < 400, latencyMs: Date.now() - start };
@@ -331,17 +322,10 @@ async function dispatch(
     const { status, body: respBody } = await doHttps(path, method, headers, body, agent);
     try { agent.destroy(); } catch {}
 
-    // 上游 429 或 5xx：尝试下一个代理
+    // 上游 429 或 5xx：代理没毛病，不丢弃，直接返回给客户端
+    // 429 是上游限流，5xx 是上游错误，都不是代理问题
     if (status === 429 || status >= 500) {
-      console.warn(`[重试] ${slot.addr} 返回 ${status}，尝试下一个代理`);
-      if (retry < MAX_RETRIES) {
-        return dispatch(path, method, headers, body, retry + 1, triedAddrs);
-      }
-      // 所有代理都失败，尝试 ZenProxy
-      if (ZENPROXY_KEY) {
-        console.log(`[回退] 重试耗尽 → ZenProxy relay`);
-        return proxyViaRelay(path, method, headers, body);
-      }
+      return new Response(respBody, { status, headers: { 'content-type': 'application/json; charset=utf-8' } });
     }
 
     return new Response(respBody, { status, headers: { 'content-type': 'application/json; charset=utf-8' } });
