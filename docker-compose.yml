@@ -1,0 +1,21 @@
+version: '3.8'
+
+services:
+  kilo-gate:
+    image: ghcr.io/YOUR_USERNAME/kilocode-free-gate:latest
+    container_name: kilo-gate
+    restart: unless-stopped
+    ports:
+      - "13339:13339"
+    environment:
+      - PORT=13339
+      # 探活超时（ms）
+      # - PROXY_PROBE_TIMEOUT=8000
+      # 候选池刷新间隔（ms，5 分钟）
+      # - PROXY_REFRESH_MS=300000
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:13339/v1/models"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
