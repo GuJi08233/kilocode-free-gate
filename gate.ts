@@ -39,6 +39,11 @@ const SLOT_COUNT = 2;                               // 轮换代理数
 const PROXY_PROBE_TIMEOUT = parseInt(process.env.PROXY_PROBE_TIMEOUT || '8000');
 const PROXY_REFRESH_MS = parseInt(process.env.PROXY_REFRESH_MS || '300000');
 
+// –– ZenProxy 备用通道 ––
+const ZENPROXY_RELAY = process.env.ZENPROXY_RELAY || 'https://zenproxy.top/api/relay';
+const ZENPROXY_KEY = process.env.ZENPROXY_KEY || '';
+const FORCE_RELAY = process.env.FORCE_RELAY === '1';
+
 // –– 全局状态 ––
 let candidates: ProxyItem[] = [];
 let slots: Slot[] = [];          // 当前 2 个可用代理
@@ -277,11 +282,16 @@ function doHttpsStream(
   });
 }
 
-/** 核心：轮询选 slot，失败重试，全部失败返回错误 */
+/** 核心：轮询选 slot，失败重试，全部失败走 ZenProxy */
 async function dispatch(
   path: string, method: string, headers: Record<string, string>,
   body: string | undefined, retry = 0, triedAddrs = new Set<string>(),
 ): Promise<Response> {
+  if (FORCE_RELAY) {
+    if (ZENPROXY_KEY) return proxyViaRelay(path, method, headers, body);
+    return new Response('{"error":"FORCE_RELAY 但未配置 ZENPROXY_KEY"}', { status: 502, headers: { 'content-type': 'application/json' } });
+  }
+
   // 没有 slot 尝试填充
   if (slots.length === 0) await fillSlots();
 
@@ -291,26 +301,12 @@ async function dispatch(
   rrCursor++;
 
   if (!slot) {
-    // 所有 slot 都试过了，直接连接
-    console.log(`[直连] 无可用代理，直接连接上游`);
-    const agent = makeAgent('', 'http'); // 不使用代理
-    try {
-      const isStream = (headers['accept'] || '').includes('event-stream');
-      if (isStream) {
-        const { stream } = await doHttpsStream(path, method, headers, body, agent);
-        return new Response(stream, {
-          status: 200,
-          headers: { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-cache' },
-        });
-      }
-      const { status, body: respBody } = await doHttps(path, method, headers, body, agent);
-      return new Response(respBody, { status, headers: { 'content-type': 'application/json; charset=utf-8' } });
-    } catch (e: any) {
-      return new Response(JSON.stringify({ error: `连接失败: ${e.message}` }), {
-        status: 502,
-        headers: { 'content-type': 'application/json' },
-      });
+    // 所有 slot 都试过了 → ZenProxy
+    if (ZENPROXY_KEY) {
+      console.log(`[回退] 所有 slot 失败 → ZenProxy relay`);
+      return proxyViaRelay(path, method, headers, body);
     }
+    return new Response('{"error":"没有可用代理"}', { status: 502, headers: { 'content-type': 'application/json' } });
   }
 
   triedAddrs.add(slot.addr);
@@ -347,11 +343,31 @@ async function dispatch(
     if (retry < MAX_RETRIES) {
       return dispatch(path, method, headers, body, retry + 1, triedAddrs);
     }
+    if (ZENPROXY_KEY) {
+      console.log(`[回退] 重试耗尽 → ZenProxy relay`);
+      return proxyViaRelay(path, method, headers, body);
+    }
     return new Response(JSON.stringify({ error: `所有代理失败: ${e.message}` }), {
       status: 502,
       headers: { 'content-type': 'application/json' },
     });
   }
+}
+
+/** ZenProxy 备用通道 */
+async function proxyViaRelay(
+  path: string, method: string, headers: Record<string, string>, body: string | undefined,
+): Promise<Response> {
+  const clean: Record<string, string> = { ...headers };
+  delete clean['host'];
+  delete clean['content-length'];
+  delete clean['authorization'];
+
+  const target = `${UPSTREAM}${path}`;
+  const url = `${ZENPROXY_RELAY}?api_key=${encodeURIComponent(ZENPROXY_KEY)}&url=${encodeURIComponent(target)}&method=${method}`;
+
+  const res = await fetch(url, { method: 'POST', headers: clean, body });
+  return new Response(res.body, { status: res.status, headers: res.headers });
 }
 
 // ––––––––––––––––––––––––––––––––––––––––––––––––––––
@@ -381,6 +397,7 @@ function normalize(raw: string): string | null {
 console.log(`[门] http://localhost:${PORT}`);
 console.log(`[门] OpenAI:    /openai/v1/chat/completions | /openai/v1/models`);
 console.log(`[门] 直接:      /v1/chat/completions | /v1/models`);
+console.log(`[门] 备用:      ${ZENPROXY_KEY ? `ZenProxy relay 已启用 (${ZENPROXY_RELAY})` : '未配置 ZENPROXY_KEY'}`);
 console.log(`[门] 策略:      ${SLOT_COUNT} slot 轮换, MAX_RETRIES=${MAX_RETRIES}`);
 
 Bun.serve({

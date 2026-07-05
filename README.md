@@ -171,8 +171,19 @@ docker restart kilo-gate
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | `PORT` | `13339` | 监听端口 |
+| `ZENPROXY_KEY` | 空 | 启用 ZenProxy 备用通道（[申请 Key](https://zenproxy.top)） |
+| `ZENPROXY_RELAY` | `https://zenproxy.top/api/relay` | 自定义 relay 端点 |
+| `FORCE_RELAY` | `0` | 设为 `1` 跳过代理池强制走 ZenProxy（调试用） |
 | `PROXY_PROBE_TIMEOUT` | `8000` | 新代理探活超时（ms） |
 | `PROXY_REFRESH_MS` | `300000` | 候选池刷新间隔（ms，默认 5 分钟） |
+
+### 关于 ZenProxy 备用通道
+
+主路径（免费代理池）失败时，自动回退到 ZenProxy 的 `/api/relay` 转发。回退触发条件：
+
+1. 启动时 `proxy.amux.ai` 拉不到代理
+2. 2 个 slot 全部失败，重试耗尽
+3. `FORCE_RELAY=1` 强制使用
 
 ---
 
