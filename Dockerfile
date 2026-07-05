@@ -21,7 +21,7 @@ FROM oven/bun:1.3.14-alpine AS runtime
 # OCI 标签
 LABEL org.opencontainers.image.title="kilocode-free-gate" \
       org.opencontainers.image.description="Kilo Code 免费模型反代网关" \
-      org.opencontainers.image.source="https://github.com/YOUR_USERNAME/kilocode-free-gate" \
+      org.opencontainers.image.source="https://github.com/GuJi08233/kilocode-free-gate" \
       org.opencontainers.image.licenses="MIT"
 
 # 安装 wget（健康检查用）

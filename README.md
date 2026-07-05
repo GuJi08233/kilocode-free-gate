@@ -1,6 +1,6 @@
 # kilocode-free-gate
 
-[![Docker Image](https://img.shields.io/badge/ghcr.io-kilocode--free--gate-blue?logo=docker)](https://github.com/YOUR_USERNAME/kilocode-free-gate/pkgs/container/kilocode-free-gate)
+[![Docker Image](https://img.shields.io/badge/ghcr.io-kilocode--free--gate-blue?logo=docker)](https://github.com/GuJi08233/kilocode-free-gate/pkgs/container/kilocode-free-gate)
 
 [Kilo Code](https://kilo.ai) 免费模型的**自动代理反代网关**。
 
@@ -31,7 +31,7 @@
 docker run -d --name kilo-gate \
   -p 13339:13339 \
   --restart unless-stopped \
-  ghcr.io/YOUR_USERNAME/kilocode-free-gate:latest
+  ghcr.io/GuJi08233/kilocode-free-gate:latest
 ```
 
 ### 方式二：从源码运行
@@ -41,7 +41,7 @@ docker run -d --name kilo-gate \
 curl -fsSL https://bun.sh/install | bash
 
 # 克隆
-git clone https://github.com/YOUR_USERNAME/kilocode-free-gate.git
+git clone https://github.com/GuJi08233/kilocode-free-gate.git
 cd kilocode-free-gate
 bun install
 bun run gate.ts
@@ -57,7 +57,7 @@ PORT=8080 bun run gate.ts
 ```yaml
 services:
   kilo-gate:
-    image: ghcr.io/YOUR_USERNAME/kilocode-free-gate:latest
+    image: ghcr.io/GuJi08233/kilocode-free-gate:latest
     container_name: kilo-gate
     restart: unless-stopped
     ports:
@@ -121,19 +121,19 @@ curl http://localhost:13339/v1/chat/completions \
 
 ```bash
 # 1. 在 VPS 上拉镜像
-docker pull ghcr.io/YOUR_USERNAME/kilocode-free-gate:latest
+docker pull ghcr.io/GuJi08233/kilocode-free-gate:latest
 
 # 2. 后台运行
 docker run -d --name kilo-gate \
   -p 13339:13339 \
   --restart unless-stopped \
-  ghcr.io/YOUR_USERNAME/kilocode-free-gate:latest
+  ghcr.io/GuJi08233/kilocode-free-gate:latest
 
 # 3. 验证
 curl http://your-vps-ip:13339/v1/models
 
 # 4. 更新镜像
-docker pull ghcr.io/YOUR_USERNAME/kilocode-free-gate:latest && \
+docker pull ghcr.io/GuJi08233/kilocode-free-gate:latest && \
 docker restart kilo-gate
 ```
 

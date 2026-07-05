@@ -2,7 +2,7 @@ version: '3.8'
 
 services:
   kilo-gate:
-    image: ghcr.io/YOUR_USERNAME/kilocode-free-gate:latest
+    image: ghcr.io/GuJi08233/kilocode-free-gate:latest
     container_name: kilo-gate
     restart: unless-stopped
     ports:
