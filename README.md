@@ -171,11 +171,25 @@ docker restart kilo-gate
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | `PORT` | `13339` | 监听端口 |
+| `PROXY_API` | `https://proxy.amux.ai/api/proxies` | 第一个代理池 API |
+| `PROXY_API_2` | 空 | 第二个代理池 API（可选，增加 IP 池） |
+| `SLOT_COUNT` | `4` | 轮换代理数量（增加可提高并发） |
 | `ZENPROXY_KEY` | 空 | 启用 ZenProxy 备用通道（[申请 Key](https://zenproxy.top)） |
 | `ZENPROXY_RELAY` | `https://zenproxy.top/api/relay` | 自定义 relay 端点 |
 | `FORCE_RELAY` | `0` | 设为 `1` 跳过代理池强制走 ZenProxy（调试用） |
 | `PROXY_PROBE_TIMEOUT` | `8000` | 新代理探活超时（ms） |
 | `PROXY_REFRESH_MS` | `300000` | 候选池刷新间隔（ms，默认 5 分钟） |
+
+### 双代理池配置
+
+使用两个代理池可以获得更多 IP，提高并发和上限：
+
+```bash
+bun run gate.ts \
+  PROXY_API=https://proxy.amux.ai/api/proxies \
+  PROXY_API_2=https://your-second-pool/api/proxies \
+  SLOT_COUNT=6
+```
 
 ### 关于 ZenProxy 备用通道
 

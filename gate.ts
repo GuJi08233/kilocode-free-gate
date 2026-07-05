@@ -29,13 +29,14 @@ interface Slot {
   proto: 'http' | 'socks5';
 }
 
-const PROXY_API = 'https://proxy.amux.ai/api/proxies';
+const PROXY_API = process.env.PROXY_API || 'https://proxy.amux.ai/api/proxies';
+const PROXY_API_2 = process.env.PROXY_API_2 || '';  // 第二个代理池
 const UPSTREAM = 'https://api.kilo.ai/api/gateway';
 const PORT = parseInt(process.env.PORT || '13339');
 const MAX_RETRIES = 3;
 const TIMEOUT = 120000;
 const STREAM_TIMEOUT = 300000;
-const SLOT_COUNT = 2;                               // 轮换代理数
+const SLOT_COUNT = parseInt(process.env.SLOT_COUNT || '4');  // 轮换代理数，默认4个
 const PROXY_PROBE_TIMEOUT = parseInt(process.env.PROXY_PROBE_TIMEOUT || '8000');
 const PROXY_REFRESH_MS = parseInt(process.env.PROXY_REFRESH_MS || '300000');
 
@@ -65,13 +66,36 @@ const FORWARD = [
 async function loadCandidates(): Promise<void> {
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), 5000);
+
+  const apis = [PROXY_API];
+  if (PROXY_API_2) apis.push(PROXY_API_2);
+
   try {
-    const res = await fetch(PROXY_API, { signal: ctl.signal });
-    const all: any[] = await res.json();
-    candidates = all
-      .filter((p) => p.quality_grade === 'S' && p.status === 'active')
-      .sort((a, b) => a.latency - b.latency);
-    console.log(`[选] ${candidates.length} S-grade candidates`);
+    const results = await Promise.all(apis.map(async (api) => {
+      try {
+        const res = await fetch(api, { signal: ctl.signal });
+        const all: any[] = await res.json();
+        return all.filter((p) => p.quality_grade === 'S' && p.status === 'active');
+      } catch (e: any) {
+        console.warn(`[选] ${api} failed: ${e.message}`);
+        return [];
+      }
+    }));
+
+    // 合并去重
+    const seen = new Set<string>();
+    const merged: ProxyItem[] = [];
+    for (const items of results) {
+      for (const item of items) {
+        if (!seen.has(item.address)) {
+          seen.add(item.address);
+          merged.push(item);
+        }
+      }
+    }
+
+    candidates = merged.sort((a, b) => a.latency - b.latency);
+    console.log(`[选] ${candidates.length} S-grade candidates (from ${apis.length} pools)`);
   } catch (e: any) {
     candidates = [];
     console.warn(`[选] load failed: ${e.message}`);
@@ -397,6 +421,7 @@ function normalize(raw: string): string | null {
 console.log(`[门] http://localhost:${PORT}`);
 console.log(`[门] OpenAI:    /openai/v1/chat/completions | /openai/v1/models`);
 console.log(`[门] 直接:      /v1/chat/completions | /v1/models`);
+console.log(`[门] 代理池:    ${PROXY_API_2 ? '2 个' : '1 个'}`);
 console.log(`[门] 备用:      ${ZENPROXY_KEY ? `ZenProxy relay 已启用 (${ZENPROXY_RELAY})` : '未配置 ZENPROXY_KEY'}`);
 console.log(`[门] 策略:      ${SLOT_COUNT} slot 轮换, MAX_RETRIES=${MAX_RETRIES}`);
 
