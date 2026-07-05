@@ -44,6 +44,9 @@ const ZENPROXY_RELAY = process.env.ZENPROXY_RELAY || 'https://zenproxy.top/api/r
 const ZENPROXY_KEY = process.env.ZENPROXY_KEY || '';
 const FORCE_RELAY = process.env.FORCE_RELAY === '1';
 
+// –– 网关认证 ––
+const GATEWAY_KEY = process.env.GATEWAY_KEY || '';  // 网关访问密钥
+
 // –– 全局状态 ––
 let candidates: ProxyItem[] = [];
 let slots: Slot[] = [];          // 当前 2 个可用代理
@@ -385,6 +388,7 @@ function normalize(raw: string): string | null {
 
 console.log(`[门] http://localhost:${PORT}`);
 console.log(`[门] OpenAI:    /openai/v1/chat/completions | /openai/v1/models`);
+console.log(`[门] 认证:      ${GATEWAY_KEY ? '已启用 GATEWAY_KEY' : '未启用（任何人可访问）'}`);
 console.log(`[门] 备用:      ${ZENPROXY_KEY ? `ZenProxy relay 已启用 (${ZENPROXY_RELAY})` : '未配置 ZENPROXY_KEY'}`);
 console.log(`[门] 策略:      ${SLOT_COUNT} slot 轮换, MAX_RETRIES=${MAX_RETRIES}`);
 
@@ -394,8 +398,18 @@ Bun.serve({
   async fetch(req) {
     const { pathname: raw, search } = new URL(req.url);
     const method = req.method;
-    const pathname = normalize(raw);
     console.log(`[>] ${method} ${raw}`);
+
+    // 网关认证检查
+    if (GATEWAY_KEY) {
+      const auth = req.headers.get('authorization') || '';
+      const token = auth.replace(/^Bearer\s+/i, '');
+      if (token !== GATEWAY_KEY) {
+        return new Response('{"error":"Unauthorized"}', { status: 401, headers: { 'content-type': 'application/json' } });
+      }
+    }
+
+    const pathname = normalize(raw);
 
     if (!pathname) {
       if (raw === '/' || raw === '/v1') {
