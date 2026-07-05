@@ -290,10 +290,20 @@ async function dispatch(
   // 没有 slot 尝试填充
   if (slots.length === 0) await fillSlots();
 
-  // 选一个没试过的 slot
+  // 选一个没试过的 slot（round-robin 轮询所有 slot，跳过已尝试的）
   const available = slots.filter((s) => !triedAddrs.has(s.addr));
-  const slot = available[rrCursor % available.length] || available[0] || null;
-  rrCursor++;
+  if (available.length === 0) {
+    // 所有 slot 都试过了 → ZenProxy
+    if (ZENPROXY_KEY) {
+      console.log(`[回退] 所有 slot 失败 → ZenProxy relay`);
+      return proxyViaRelay(path, method, headers, body);
+    }
+    return new Response('{"error":"没有可用代理"}', { status: 502, headers: { 'content-type': 'application/json' } });
+  }
+
+  // 使用全局 rrCursor 在所有 slot 中轮询，确保均匀分布
+  const slot = available[rrCursor % available.length];
+  rrCursor = (rrCursor + 1) % slots.length;  // 在所有 slot 长度内轮询
 
   if (!slot) {
     // 所有 slot 都试过了 → ZenProxy
@@ -384,6 +394,12 @@ console.log(`[门] OpenAI:    /openai/v1/chat/completions | /openai/v1/models`);
 console.log(`[门] 认证:      ${GATEWAY_KEY ? '已启用 GATEWAY_KEY' : '未启用（任何人可访问）'}`);
 console.log(`[门] 备用:      ${ZENPROXY_KEY ? `ZenProxy relay 已启用 (${ZENPROXY_RELAY})` : '未配置 ZENPROXY_KEY'}`);
 console.log(`[门] 策略:      ${SLOT_COUNT} slot 轮换, MAX_RETRIES=${MAX_RETRIES}`);
+console.log(`[门] 预热中...`);
+
+// 预热：加载候选 + 探活填充 slot（等待完成后再启动服务）
+await loadCandidates();
+await fillSlots();
+console.log(`[门] 预热完成，服务启动`);
 
 Bun.serve({
   port: PORT,
@@ -437,11 +453,6 @@ Bun.serve({
     return new Response('{"error":"not found"}', { status: 404, headers: { 'content-type': 'application/json' } });
   },
 });
-
-// 启动：加载候选 + 探活填充 slot
-loadCandidates()
-  .then(() => fillSlots())
-  .catch((e) => console.error('[门] initial fill failed:', e));
 
 // 定期刷新
 const refreshTimer = setInterval(() => {
