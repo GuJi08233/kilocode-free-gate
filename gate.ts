@@ -35,9 +35,12 @@ const PORT = parseInt(process.env.PORT || '13339');
 const MAX_RETRIES = 3;
 const TIMEOUT = 120000;
 const STREAM_TIMEOUT = 300000;
-const SLOT_COUNT = 2;                               // 轮换代理数
+const SLOT_COUNT = Math.max(3, Math.min(5, parseInt(process.env.SLOT_COUNT || '3')));  // 3-5个槽位
 const PROXY_PROBE_TIMEOUT = parseInt(process.env.PROXY_PROBE_TIMEOUT || '8000');
 const PROXY_REFRESH_MS = parseInt(process.env.PROXY_REFRESH_MS || '300000');
+
+// –– 自定义代理配置（兜底备用）––
+const CUSTOM_PROXIES = process.env.CUSTOM_PROXIES || '';  // 自定义代理列表，逗号分隔
 
 // –– ZenProxy 备用通道 ––
 const ZENPROXY_RELAY = process.env.ZENPROXY_RELAY || 'https://zenproxy.top/api/relay';
@@ -49,7 +52,8 @@ const GATEWAY_KEY = process.env.GATEWAY_KEY || '';  // 网关访问密钥
 
 // –– 全局状态 ––
 let candidates: ProxyItem[] = [];
-let slots: Slot[] = [];          // 当前 2 个可用代理
+let slots: Slot[] = [];          // 当前可用代理槽位
+let customSlots: Slot[] = [];    // 自定义代理槽位（兜底）
 let rrCursor = 0;
 let refreshing = false;
 
@@ -62,7 +66,47 @@ const FORWARD = [
 ];
 
 // ––––––––––––––––––––––––––––––––––––––––––––––––––––
-//  候选池
+//  自定义代理解析（兜底备用）
+// ––––––––––––––––––––––––––––––––––––––––––––––––––––
+
+/** 解析自定义代理列表，格式：http://host:port,socks5://host:port,... */
+function parseCustomProxies(input: string): ProxyItem[] {
+  if (!input.trim()) return [];
+  return input.split(',').map((addr) => {
+    const trimmed = addr.trim();
+    if (!trimmed) return null;
+    const isSocks = trimmed.startsWith('socks5://') || trimmed.startsWith('socks5h://');
+    return {
+      address: trimmed.replace(/^https?:\/\//, '').replace(/^socks5h?:\/\//, ''),
+      protocol: isSocks ? 'socks5' : 'http',
+      latency: 0,
+      quality_grade: 'custom',
+    };
+  }).filter((p): p is ProxyItem => p !== null);
+}
+
+/** 初始化自定义代理槽位（只在启动时调用一次） */
+async function initCustomSlots(): Promise<void> {
+  if (!CUSTOM_PROXIES) return;
+  const items = parseCustomProxies(CUSTOM_PROXIES);
+  if (items.length === 0) return;
+
+  const results = await Promise.all(items.map(async (item) => {
+    const r = await probe(item);
+    return { item, ...r };
+  }));
+
+  for (const r of results) {
+    if (!r.ok) continue;
+    const url = r.item.protocol === 'socks5' ? `socks5h://${r.item.address}` : `http://${r.item.address}`;
+    customSlots.push({ addr: r.item.address, url, proto: r.item.protocol as 'http' | 'socks5' });
+    console.log(`[兜底+] ${r.item.address} (${r.latencyMs}ms)`);
+  }
+  console.log(`[兜底] ${customSlots.length}/${items.length} custom proxies ready`);
+}
+
+// ––––––––––––––––––––––––––––––––––––––––––––––––––––
+//  候选池（S级免费代理）
 // ––––––––––––––––––––––––––––––––––––––––––––––––––––
 
 async function loadCandidates(): Promise<void> {
@@ -277,7 +321,7 @@ function doHttpsStream(
   });
 }
 
-/** 核心：轮询选 slot，失败重试，全部失败走 ZenProxy */
+/** 核心：轮询选 slot，失败重试，回退策略：S级代理 → ZenProxy → 自定义代理 */
 async function dispatch(
   path: string, method: string, headers: Record<string, string>,
   body: string | undefined, retry = 0, triedAddrs = new Set<string>(),
@@ -293,10 +337,15 @@ async function dispatch(
   // 选一个没试过的 slot（round-robin 轮询所有 slot，跳过已尝试的）
   const available = slots.filter((s) => !triedAddrs.has(s.addr));
   if (available.length === 0) {
-    // 所有 slot 都试过了 → ZenProxy
+    // 所有 S级 slot 都试过了 → 尝试 ZenProxy
     if (ZENPROXY_KEY) {
-      console.log(`[回退] 所有 slot 失败 → ZenProxy relay`);
+      console.log(`[回退] S级代理失败 → ZenProxy relay`);
       return proxyViaRelay(path, method, headers, body);
+    }
+    // 没有 ZenProxy → 尝试自定义代理兜底
+    if (customSlots.length > 0) {
+      console.log(`[回退] S级代理失败 → 自定义代理兜底`);
+      return dispatchViaCustom(path, method, headers, body);
     }
     return new Response('{"error":"没有可用代理"}', { status: 502, headers: { 'content-type': 'application/json' } });
   }
@@ -306,10 +355,15 @@ async function dispatch(
   rrCursor = (rrCursor + 1) % slots.length;  // 在所有 slot 长度内轮询
 
   if (!slot) {
-    // 所有 slot 都试过了 → ZenProxy
+    // 所有 S级 slot 都试过了 → 尝试 ZenProxy
     if (ZENPROXY_KEY) {
-      console.log(`[回退] 所有 slot 失败 → ZenProxy relay`);
+      console.log(`[回退] S级代理失败 → ZenProxy relay`);
       return proxyViaRelay(path, method, headers, body);
+    }
+    // 没有 ZenProxy → 尝试自定义代理兜底
+    if (customSlots.length > 0) {
+      console.log(`[回退] S级代理失败 → 自定义代理兜底`);
+      return dispatchViaCustom(path, method, headers, body);
     }
     return new Response('{"error":"没有可用代理"}', { status: 502, headers: { 'content-type': 'application/json' } });
   }
@@ -349,11 +403,66 @@ async function dispatch(
     if (retry < MAX_RETRIES) {
       return dispatch(path, method, headers, body, retry + 1, triedAddrs);
     }
+    // 重试耗尽 → 尝试 ZenProxy
     if (ZENPROXY_KEY) {
       console.log(`[回退] 重试耗尽 → ZenProxy relay`);
       return proxyViaRelay(path, method, headers, body);
     }
+    // 没有 ZenProxy → 尝试自定义代理兜底
+    if (customSlots.length > 0) {
+      console.log(`[回退] 重试耗尽 → 自定义代理兜底`);
+      return dispatchViaCustom(path, method, headers, body);
+    }
     return new Response(JSON.stringify({ error: `所有代理失败: ${e.message}` }), {
+      status: 502,
+      headers: { 'content-type': 'application/json' },
+    });
+  }
+}
+
+/** 通过自定义代理兜底转发 */
+async function dispatchViaCustom(
+  path: string, method: string, headers: Record<string, string>,
+  body: string | undefined, retry = 0, triedAddrs = new Set<string>(),
+): Promise<Response> {
+  if (customSlots.length === 0) {
+    return new Response('{"error":"没有可用的自定义代理"}', { status: 502, headers: { 'content-type': 'application/json' } });
+  }
+
+  // 选一个没试过的自定义代理
+  const available = customSlots.filter((s) => !triedAddrs.has(s.addr));
+  if (available.length === 0) {
+    return new Response('{"error":"所有自定义代理均失败"}', { status: 502, headers: { 'content-type': 'application/json' } });
+  }
+
+  const slot = available[0];
+  triedAddrs.add(slot.addr);
+  console.log(`[兜底取] ${slot.addr} (retry=${retry})`);
+
+  const isStream = (headers['accept'] || '').includes('event-stream');
+  const agent = makeAgent(slot.url, slot.proto);
+
+  try {
+    if (isStream) {
+      const { stream } = await doHttpsStream(path, method, headers, body, agent);
+      return new Response(stream, {
+        status: 200,
+        headers: { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-cache' },
+      });
+    }
+
+    const { status, body: respBody } = await doHttps(path, method, headers, body, agent);
+    try { agent.destroy(); } catch {}
+
+    return new Response(respBody, { status, headers: { 'content-type': 'application/json; charset=utf-8' } });
+  } catch (e: any) {
+    console.error(`[兜底错] ${slot.addr}: ${e.message}`);
+    try { agent.destroy(); } catch {}
+
+    if (retry < MAX_RETRIES) {
+      return dispatchViaCustom(path, method, headers, body, retry + 1, triedAddrs);
+    }
+    return new Response(JSON.stringify({ error: `所有自定义代理失败: ${e.message}` }), {
       status: 502,
       headers: { 'content-type': 'application/json' },
     });
@@ -392,13 +501,15 @@ function normalize(raw: string): string | null {
 console.log(`[门] http://localhost:${PORT}`);
 console.log(`[门] OpenAI:    /openai/v1/chat/completions | /openai/v1/models`);
 console.log(`[门] 认证:      ${GATEWAY_KEY ? '已启用 GATEWAY_KEY' : '未启用（任何人可访问）'}`);
+console.log(`[门] 策略:      S级代理(${SLOT_COUNT}槽) → ${ZENPROXY_KEY ? 'ZenProxy → ' : ''}自定义代理兜底${CUSTOM_PROXIES ? ` (${parseCustomProxies(CUSTOM_PROXIES).length}个)` : '(未配置)'}`);
 console.log(`[门] 备用:      ${ZENPROXY_KEY ? `ZenProxy relay 已启用 (${ZENPROXY_RELAY})` : '未配置 ZENPROXY_KEY'}`);
-console.log(`[门] 策略:      ${SLOT_COUNT} slot 轮换, MAX_RETRIES=${MAX_RETRIES}`);
+console.log(`[门] 重试:      MAX_RETRIES=${MAX_RETRIES}`);
 console.log(`[门] 预热中...`);
 
-// 预热：加载候选 + 探活填充 slot（等待完成后再启动服务）
+// 预热：加载候选 + 探活填充 slot + 初始化自定义代理（等待完成后再启动服务）
 await loadCandidates();
 await fillSlots();
+await initCustomSlots();
 console.log(`[门] 预热完成，服务启动`);
 
 Bun.serve({
