@@ -635,6 +635,97 @@ async function proxyViaRelay(
 }
 
 // ––––––––––––––––––––––––––––––––––––––––––––––––––––
+//  模型过滤与重定向
+// ––––––––––––––––––––––––––––––––––––––––––––––––––––
+
+// 特殊模型映射（非标准格式，手动指定）
+const SPECIAL_MODEL_MAP: Record<string, string> = {
+  'kilo-auto/free': 'kilo-auto',
+  'openrouter/free': 'openrouter-free',
+};
+
+// 构建完整映射：上游模型名 → 用户看到的模型名
+function buildModelMaps() {
+  // 需要从上游获取模型列表来构建映射
+  // 这里先放特殊映射，启动后会动态补充
+  const rename: Record<string, string> = { ...SPECIAL_MODEL_MAP };
+  const redirect: Record<string, string> = {};
+  for (const [upstream, display] of Object.entries(rename)) {
+    redirect[display] = upstream;
+  }
+  return { rename, redirect };
+}
+
+const { rename: MODEL_RENAME_INIT, redirect: MODEL_REDIRECT_INIT } = buildModelMaps();
+let MODEL_RENAME: Record<string, string> = MODEL_RENAME_INIT;
+let MODEL_REDIRECT: Record<string, string> = MODEL_REDIRECT_INIT;
+let ALLOWED_MODELS = new Set<string>(Object.keys(MODEL_REDIRECT_INIT));
+
+/** 从上游获取模型列表，构建过滤+重命名映射 */
+async function initModelMaps(): Promise<void> {
+  try {
+    const res = await fetch(`${UPSTREAM}/models`, {
+      headers: { accept: 'application/json' },
+      signal: AbortSignal.timeout(10000),
+    });
+    const data = await res.json();
+    const all: any[] = Array.isArray(data) ? data : data.data || [];
+
+    const rename: Record<string, string> = { ...SPECIAL_MODEL_MAP };
+    for (const m of all) {
+      const id: string = m.id || m;
+      if (id in SPECIAL_MODEL_MAP) continue; // 特殊模型已处理
+      if (id.endsWith(':free')) {
+        // provider/model:free → model
+        const parts = id.replace(/:free$/, '').split('/');
+        const display = parts[parts.length - 1];
+        rename[id] = display;
+      }
+    }
+
+    const redirect: Record<string, string> = {};
+    for (const [upstream, display] of Object.entries(rename)) {
+      redirect[display] = upstream;
+    }
+
+    MODEL_RENAME = rename;
+    MODEL_REDIRECT = redirect;
+    ALLOWED_MODELS = new Set(Object.keys(redirect));
+
+    console.log(`[模型] ${Object.keys(rename).length} 个免费模型已加载: ${Object.values(rename).join(', ')}`);
+  } catch (e: any) {
+    console.warn(`[模型] 加载失败: ${e.message}，使用特殊映射兜底`);
+  }
+}
+
+/** 拦截 GET /v1/models，返回过滤+重命名后的模型列表 */
+function handleModelsList(): Response {
+  const models = Object.values(MODEL_RENAME).sort().map((id) => ({
+    id,
+    object: 'model',
+    created: Math.floor(Date.now() / 1000),
+    owned_by: 'kilocode',
+  }));
+  return new Response(JSON.stringify({ object: 'list', data: models }), {
+    headers: { 'content-type': 'application/json; charset=utf-8' },
+  });
+}
+
+/** 将请求体中的模型名重定向为上游实际模型名 */
+function rewriteModel(body: string): string {
+  try {
+    const json = JSON.parse(body);
+    if (json.model && MODEL_REDIRECT[json.model]) {
+      const original = json.model;
+      json.model = MODEL_REDIRECT[original];
+      console.log(`[模型重定向] ${original} → ${json.model}`);
+      return JSON.stringify(json);
+    }
+  } catch {}
+  return body;
+}
+
+// ––––––––––––––––––––––––––––––––––––––––––––––––––––
 //  路由
 // ––––––––––––––––––––––––––––––––––––––––––––––––––––
 
@@ -659,10 +750,15 @@ if (PROXY_MODE === 'auto') {
 console.log(`[门] 备用:      ${ZENPROXY_KEY ? `ZenProxy relay 已启用 (${ZENPROXY_RELAY})` : '未配置 ZENPROXY_KEY'}`);
 console.log(`[门] 预热中...`);
 
-// 预热
-const initPromise = PROXY_MODE === 'auto'
-  ? loadCandidates().then(() => fillSlots()).then(() => initCustomSlots())
-  : initCustomSlots();
+// 预热：加载模型映射 + 初始化代理
+const initPromise = (async () => {
+  await initModelMaps();
+  if (PROXY_MODE === 'auto') {
+    await loadCandidates();
+    await fillSlots();
+  }
+  await initCustomSlots();
+})();
 
 await initPromise;
 console.log(`[门] 预热完成，服务启动`);
@@ -712,7 +808,8 @@ Bun.serve({
 
     let response: Response;
     if (pathname === '/v1/models' && method === 'GET') {
-      response = await dispatch(pathname + search, 'GET', collectHeaders(req), undefined, 0, new Set<string>(), reqLog);
+      // 本地返回过滤+重命名后的模型列表，不走上游
+      response = handleModelsList();
     } else if ((pathname === '/v1/chat/completions' || pathname === '/v1/messages') && method === 'POST') {
       let body = await req.text();
       const h = collectHeaders(req);
@@ -726,6 +823,8 @@ Bun.serve({
           if (!json.stream) { json.stream = true; body = JSON.stringify(json); }
         } catch {}
       }
+      // 模型名重定向（step-3.7-flash → stepfun/step-3.7-flash:free）
+      body = rewriteModel(body);
       response = await dispatch(pathname, 'POST', h, body, 0, new Set<string>(), reqLog);
     } else {
       return new Response('{"error":"not found"}', { status: 404, headers: { 'content-type': 'application/json' } });
