@@ -646,7 +646,7 @@ async function proxyViaRelay(
 }
 
 // ––––––––––––––––––––––––––––––––––––––––––––––––––––
-//  模型过滤与重定向
+//  模型过滤与重定向（实时获取，60秒缓存）
 // ––––––––––––––––––––––––––––––––––––––––––––––––––––
 
 // 特殊模型映射（非标准格式，手动指定）
@@ -655,29 +655,20 @@ const SPECIAL_MODEL_MAP: Record<string, string> = {
   'openrouter/free': 'openrouter-free',
 };
 
-// 构建完整映射：上游模型名 → 用户看到的模型名
-function buildModelMaps() {
-  // 需要从上游获取模型列表来构建映射
-  // 这里先放特殊映射，启动后会动态补充
-  const rename: Record<string, string> = { ...SPECIAL_MODEL_MAP };
-  const redirect: Record<string, string> = {};
-  for (const [upstream, display] of Object.entries(rename)) {
-    redirect[display] = upstream;
+// 缓存
+let modelCache: { rename: Record<string, string>; redirect: Record<string, string>; ts: number } | null = null;
+const MODEL_CACHE_TTL = 60000;  // 60秒缓存
+
+/** 从上游实时获取免费模型列表，构建映射 */
+async function fetchModelMaps(): Promise<{ rename: Record<string, string>; redirect: Record<string, string> }> {
+  if (modelCache && Date.now() - modelCache.ts < MODEL_CACHE_TTL) {
+    return modelCache;
   }
-  return { rename, redirect };
-}
 
-const { rename: MODEL_RENAME_INIT, redirect: MODEL_REDIRECT_INIT } = buildModelMaps();
-let MODEL_RENAME: Record<string, string> = MODEL_RENAME_INIT;
-let MODEL_REDIRECT: Record<string, string> = MODEL_REDIRECT_INIT;
-let ALLOWED_MODELS = new Set<string>(Object.keys(MODEL_REDIRECT_INIT));
-
-/** 从上游获取模型列表，构建过滤+重命名映射 */
-async function initModelMaps(): Promise<void> {
   try {
     const res = await fetch(`${UPSTREAM}/models`, {
       headers: { accept: 'application/json' },
-      signal: AbortSignal.timeout(10000),
+      signal: AbortSignal.timeout(8000),
     });
     const data = await res.json();
     const all: any[] = Array.isArray(data) ? data : data.data || [];
@@ -685,9 +676,8 @@ async function initModelMaps(): Promise<void> {
     const rename: Record<string, string> = { ...SPECIAL_MODEL_MAP };
     for (const m of all) {
       const id: string = m.id || m;
-      if (id in SPECIAL_MODEL_MAP) continue; // 特殊模型已处理
+      if (id in SPECIAL_MODEL_MAP) continue;
       if (id.endsWith(':free')) {
-        // provider/model:free → model
         const parts = id.replace(/:free$/, '').split('/');
         const display = parts[parts.length - 1];
         rename[id] = display;
@@ -699,19 +689,23 @@ async function initModelMaps(): Promise<void> {
       redirect[display] = upstream;
     }
 
-    MODEL_RENAME = rename;
-    MODEL_REDIRECT = redirect;
-    ALLOWED_MODELS = new Set(Object.keys(redirect));
-
-    console.log(`[模型] ${Object.keys(rename).length} 个免费模型已加载: ${Object.values(rename).join(', ')}`);
+    modelCache = { rename, redirect, ts: Date.now() };
+    console.log(`[模型] 已刷新 ${Object.keys(rename).length} 个免费模型: ${Object.values(rename).join(', ')}`);
+    return modelCache;
   } catch (e: any) {
-    console.warn(`[模型] 加载失败: ${e.message}，使用特殊映射兜底`);
+    if (modelCache) {
+      console.warn(`[模型] 刷新失败，使用缓存: ${e.message}`);
+      return modelCache;
+    }
+    console.warn(`[模型] 刷新失败且无缓存: ${e.message}`);
+    return { rename: { ...SPECIAL_MODEL_MAP }, redirect: Object.fromEntries(Object.entries(SPECIAL_MODEL_MAP).map(([k, v]) => [v, k])) };
   }
 }
 
 /** 拦截 GET /v1/models，返回过滤+重命名后的模型列表 */
-function handleModelsList(): Response {
-  const models = Object.values(MODEL_RENAME).sort().map((id) => ({
+async function handleModelsList(): Promise<Response> {
+  const { rename } = await fetchModelMaps();
+  const models = Object.values(rename).sort().map((id) => ({
     id,
     object: 'model',
     created: Math.floor(Date.now() / 1000),
@@ -723,12 +717,13 @@ function handleModelsList(): Response {
 }
 
 /** 将请求体中的模型名重定向为上游实际模型名 */
-function rewriteModel(body: string): string {
+async function rewriteModel(body: string): Promise<string> {
   try {
+    const { redirect } = await fetchModelMaps();
     const json = JSON.parse(body);
-    if (json.model && MODEL_REDIRECT[json.model]) {
+    if (json.model && redirect[json.model]) {
       const original = json.model;
-      json.model = MODEL_REDIRECT[original];
+      json.model = redirect[original];
       console.log(`[模型重定向] ${original} → ${json.model}`);
       return JSON.stringify(json);
     }
@@ -753,6 +748,7 @@ console.log(`[门] http://localhost:${PORT}`);
 console.log(`[门] OpenAI:    /openai/v1/chat/completions | /openai/v1/models`);
 console.log(`[门] 认证:      ${GATEWAY_KEY ? '已启用 GATEWAY_KEY' : '未启用（任何人可访问）'}`);
 console.log(`[门] 模式:      ${PROXY_MODE}`);
+console.log(`[门] 模型:      实时获取（60秒缓存）+ 特殊模型(kilo-auto, openrouter-free)`);
 if (PROXY_MODE === 'auto') {
   console.log(`[门] 策略:      S级代理(${SLOT_COUNT}槽,重试${SLOT_RETRIES}次) → ${ZENPROXY_KEY ? `ZenProxy(${ZENPROXY_RETRIES}次) → ` : ''}自定义代理${CUSTOM_PROXIES ? `(${parseCustomProxies(CUSTOM_PROXIES).length}个,重试${CUSTOM_RETRIES || '按数量'}次)` : '(未配置)'}`);
 } else {
@@ -761,9 +757,8 @@ if (PROXY_MODE === 'auto') {
 console.log(`[门] 备用:      ${ZENPROXY_KEY ? `ZenProxy relay 已启用 (${ZENPROXY_RELAY})` : '未配置 ZENPROXY_KEY'}`);
 console.log(`[门] 预热中...`);
 
-// 预热：加载模型映射 + 初始化代理
+// 预热：初始化代理（模型列表实时获取，不需要预热）
 const initPromise = (async () => {
-  await initModelMaps();
   if (PROXY_MODE === 'auto') {
     await loadCandidates();
     await fillSlots();
@@ -819,8 +814,8 @@ Bun.serve({
 
     let response: Response;
     if (pathname === '/v1/models' && method === 'GET') {
-      // 本地返回过滤+重命名后的模型列表，不走上游
-      response = handleModelsList();
+      // 实时获取上游模型列表，过滤+重命名后返回
+      response = await handleModelsList();
     } else if ((pathname === '/v1/chat/completions' || pathname === '/v1/messages') && method === 'POST') {
       let body = await req.text();
       const h = collectHeaders(req);
@@ -835,7 +830,7 @@ Bun.serve({
         } catch {}
       }
       // 模型名重定向（step-3.7-flash → stepfun/step-3.7-flash:free）
-      body = rewriteModel(body);
+      body = await rewriteModel(body);
       response = await dispatch(pathname, 'POST', h, body, 0, new Set<string>(), reqLog);
     } else {
       return new Response('{"error":"not found"}', { status: 404, headers: { 'content-type': 'application/json' } });
