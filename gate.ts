@@ -295,11 +295,9 @@ function doHttps(
   body: string | undefined, agent: https.Agent,
 ): Promise<{ status: number; body: string }> {
   return new Promise((resolve, reject) => {
-    const ctl = new AbortController();
-    const firstByteTimer = setTimeout(() => ctl.abort(new Error('代理超时')), PROXY_FIRST_BYTE_TIMEOUT);
     const req = https.request(
       `${UPSTREAM}${path}`,
-      { method, headers, agent, timeout: TIMEOUT, rejectUnauthorized: false, signal: ctl.signal },
+      { method, headers, agent, timeout: TIMEOUT, rejectUnauthorized: false },
       (res) => {
         clearTimeout(firstByteTimer);
         const chunks: Buffer[] = [];
@@ -308,6 +306,7 @@ function doHttps(
         res.on('error', reject);
       },
     );
+    const firstByteTimer = setTimeout(() => req.destroy(new Error('代理超时')), PROXY_FIRST_BYTE_TIMEOUT);
     req.on('error', (e) => { clearTimeout(firstByteTimer); reject(e); });
     req.on('timeout', () => { clearTimeout(firstByteTimer); req.destroy(new Error('超时')); });
     if (body) req.write(body);
@@ -320,11 +319,9 @@ function doHttpsStream(
   body: string | undefined, agent: https.Agent,
 ): Promise<{ status: number; stream: ReadableStream<Uint8Array> }> {
   return new Promise((resolve, reject) => {
-    const ctl = new AbortController();
-    const firstByteTimer = setTimeout(() => ctl.abort(new Error('代理超时')), PROXY_FIRST_BYTE_TIMEOUT);
     const req = https.request(
       `${UPSTREAM}${path}`,
-      { method, headers, agent, timeout: STREAM_TIMEOUT, rejectUnauthorized: false, signal: ctl.signal },
+      { method, headers, agent, timeout: STREAM_TIMEOUT, rejectUnauthorized: false },
       (res) => {
         clearTimeout(firstByteTimer);
         res.on('end', () => { try { agent.destroy(); } catch {} });
@@ -340,6 +337,7 @@ function doHttpsStream(
         resolve({ status: res.statusCode || 200, stream });
       },
     );
+    const firstByteTimer = setTimeout(() => req.destroy(new Error('代理超时')), PROXY_FIRST_BYTE_TIMEOUT);
     req.on('error', (e) => { clearTimeout(firstByteTimer); reject(e); });
     if (body) req.write(body);
     req.end();
