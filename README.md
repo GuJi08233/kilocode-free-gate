@@ -1,273 +1,91 @@
 # kilocode-free-gate
 
-[![Docker Image](https://img.shields.io/badge/ghcr.io-kilocode--free--gate-blue?logo=docker)](https://github.com/GuJi08233/kilocode-free-gate/pkgs/container/kilocode-free-gate)
+使用 Go 实现的 Kilo Code 免费模型反代网关。网关从公共代理池选取可用代理，并支持按请求轮换 HTTP、HTTPS、SOCKS5/SOCKS5H 代理。
 
-[Kilo Code](https://kilo.ai) 免费模型的**自动代理反代网关**。
+## 关键特性
 
-从公共代理池自动获取 S 级代理，2 个 IP 轮换使用，失败自动切换，解除免费模型的额度/频率限制。  
-兼容 **OpenAI** API 格式，任何客户端只需改 `base_url` 即可接入。
+- 每次代理尝试使用独立的 `http.Transport`，不共享故障连接。
+- 默认 3 秒内拿不到响应头就取消请求上下文，底层 TCP 连接会被关闭。
+- 整个代理选择与重试链共享 10 秒总预算。
+- 流式请求在成功取得响应头后可继续传输；客户端断开或流长时间无数据时自动清理连接。
+- 普通业务 `400/404/422` 直接返回，不再无意义地轮换代理。
+- 支持公共 S 级代理、自定义代理和 ZenProxy relay 多级回退。
+- 保留原有 Docker 镜像名、端口、路由、认证和环境变量。
 
----
+## API 路由
 
-## 支持的免费模型
+| 客户端类型 | 路由 |
+|---|---|
+| OpenAI | `/openai/v1/models`、`/openai/v1/chat/completions` |
+| Anthropic | `/anthropic/v1/messages` |
+| 健康检查 | `/healthz` |
 
-| 模型 ID | 名称 |
-|---------|------|
-| `kilo-auto/free` | Kilo Auto (Free Router) - 自动路由 |
-| `nvidia/nemotron-3-ultra-550b-a55b:free` | Nemotron 3 Ultra 550B |
-| `nvidia/nemotron-3-super-120b-a12b:free` | Nemotron 3 Super 120B |
-| `poolside/laguna-m.1:free` | Poolside Laguna M.1 |
-| `poolside/laguna-xs.2:free` | Poolside Laguna XS.2 |
-| `stepfun/step-3.7-flash:free` | Step 3.7 Flash |
-| `nex-agi/nex-n2-pro:free` | Nex N2 Pro |
+模型列表每 60 秒从 Kilo 上游刷新一次，保留 `:free` 模型并使用简短名称，同时保留 `kilo-auto` 和 `openrouter-free` 两个特殊映射。
 
----
-
-## 快速开始
-
-### 方式一：Docker（推荐）
-
-```bash
-docker run -d --name kilo-gate \
-  -p 13339:13339 \
-  --restart unless-stopped \
-  ghcr.io/GuJi08233/kilocode-free-gate:latest
-```
-
-### 方式二：从源码运行
-
-```bash
-# 安装 Bun（如未安装）
-curl -fsSL https://bun.sh/install | bash
-
-# 克隆
-git clone https://github.com/GuJi08233/kilocode-free-gate.git
-cd kilocode-free-gate
-bun install
-bun run gate.ts
-
-# 指定端口
-PORT=8080 bun run gate.ts
-```
-
-服务默认在 `http://localhost:13339` 启动。
-
-### docker-compose
-
-```yaml
-services:
-  kilo-gate:
-    image: ghcr.io/GuJi08233/kilocode-free-gate:latest
-    container_name: kilo-gate
-    restart: unless-stopped
-    ports:
-      - "13339:13339"
-    environment:
-      - PORT=13339
-      # - PROXY_PROBE_TIMEOUT=8000
-      # - PROXY_REFRESH_MS=300000
-    healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:13339/v1/models"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-```
+## Docker 部署
 
 ```bash
 docker compose up -d
 ```
 
----
-
-## 客户端配置
-
-### OpenAI 格式
-
-| 客户端 | 设置 |
-|---|---|
-| Python OpenAI SDK | `client = OpenAI(base_url="http://localhost:13339/v1", api_key="any")` |
-| curl | `curl http://localhost:13339/v1/chat/completions -H 'Content-Type: application/json' -d '...'` |
-| 任何 OpenAI 兼容客户端 | `base_url = http://localhost:13339/v1` |
-
-### 通过前缀访问
-
-也支持带前缀的路径：
-- `http://localhost:13339/openai/v1/chat/completions`
-- `http://localhost:13339/openai/v1/models`
-
-### 查看可用模型
+或直接运行镜像：
 
 ```bash
-curl http://localhost:13339/v1/models
-```
-
-### 示例请求
-
-```bash
-curl http://localhost:13339/v1/chat/completions \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "model": "nvidia/nemotron-3-super-120b-a12b:free",
-    "messages": [{"role": "user", "content": "Hello!"}],
-    "max_tokens": 100
-  }'
-```
-
----
-
-## 部署到海外 VPS
-
-中国大陆访问 `proxy.amux.ai` 不稳定，建议部署到海外（香港/日本/美国）VPS。
-
-```bash
-# 1. 在 VPS 上拉镜像
-docker pull ghcr.io/GuJi08233/kilocode-free-gate:latest
-
-# 2. 后台运行
-docker run -d --name kilo-gate \
-  -p 13339:13339 \
+docker run -d \
+  --name kilo-gate \
   --restart unless-stopped \
-  ghcr.io/GuJi08233/kilocode-free-gate:latest
-
-# 3. 验证
-curl http://your-vps-ip:13339/v1/models
-
-# 4. 更新镜像
-docker pull ghcr.io/GuJi08233/kilocode-free-gate:latest && \
-docker restart kilo-gate
+  -p 13339:13339 \
+  -e PORT=13339 \
+  -e PROXY_MODE=auto \
+  -e GATEWAY_KEY=your-secret-key \
+  ghcr.io/guji08233/kilocode-free-gate:latest
 ```
 
----
-
-## 架构
-
-```
-客户端 ──→ gate.ts (:13339) ──→ 代理池 ──→ api.kilo.ai/api/gateway
-                │
-                ├── /v1/*             → 转发到 /chat/completions
-                ├── /openai/v1/*      → 转发到 /v1/* (兼容 OpenAI 格式)
-                ├── 2 IP 轮换        → round-robin 轮询
-                ├── 失败重试         → 3 次重试，换 IP 再试
-                └── 直连回退         → 全部失败直连上游
-```
-
-### 核心流程
-
-1. **启动时**从 `proxy.amux.ai/api/proxies` 拉取 S 级免费代理（候选池），按延迟排序
-2. **选 2 个**延迟最低的代理，探活后放入 slot
-3. **轮询分发**：每个请求 round-robin 选一个 slot
-4. **失败处理**：
-   - 代理连不上 / 超时 → 丢弃该 slot，异步补位
-   - 重试最多 3 次（换不同 slot）
-   - 全部失败 → 直连上游
-   - 上游 5xx 不算代理失败，直接返回给客户端
-5. **每 5 分钟**自动刷新候选池，补位 slot
-6. **流式支持**：自动识别 `Accept: text/event-stream` 或 body 中的 `stream: true`，直接透传原始 SSE 流
-
----
+从 Bun 版本升级时，无需修改现有生产环境变量或 Caddy 路由，只需发布并拉取新的同名镜像。
 
 ## 环境变量
 
-| 变量 | 默认 | 说明 |
-|---|---|---|
-| `PORT` | `13339` | 监听端口 |
-| `PROXY_MODE` | `auto` | 代理模式：`auto`（自动代理池）或 `custom`（仅自定义代理） |
-| `SLOT_COUNT` | `3` | S级代理槽位数（范围 3-5，仅 auto 模式） |
-| `SLOT_RETRIES` | `SLOT_COUNT` | S级代理重试次数（默认=槽位数，每个槽位试一次） |
-| `CUSTOM_RETRIES` | `0` | 自定义代理重试次数（0=按代理数量轮询） |
-| `ZENPROXY_RETRIES` | `1` | ZenProxy 重试次数 |
-| `GATEWAY_KEY` | 空 | 网关访问密钥（设置后需要 Bearer 认证） |
-| `CUSTOM_PROXIES` | 空 | 自定义代理列表，逗号分隔（custom 模式必填，auto 模式可选兜底） |
-| `ZENPROXY_KEY` | 空 | 启用 ZenProxy 备用通道（[申请 Key](https://zenproxy.top)） |
-| `ZENPROXY_RELAY` | `https://zenproxy.top/api/relay` | 自定义 relay 端点 |
-| `FORCE_RELAY` | `0` | 设为 `1` 跳过代理池强制走 ZenProxy（调试用） |
-| `PROXY_PROBE_TIMEOUT` | `8000` | 新代理探活超时（ms） |
-| `PROXY_REFRESH_MS` | `300000` | 候选池刷新间隔（ms，默认 5 分钟，仅 auto 模式） |
+| 变量 | 默认值 | 说明 |
+|---|---:|---|
+| `PORT` | `13339` | HTTP 监听端口 |
+| `GATEWAY_KEY` | 空 | 设置后要求客户端提供相同的 Bearer token |
+| `PROXY_MODE` | `auto` | `auto` 使用公共代理池；`custom` 仅使用自定义代理链 |
+| `SLOT_COUNT` | `3` | 公共代理槽位数，限制为 3–5 |
+| `SLOT_RETRIES` | 槽位数 | 单请求最多尝试的公共代理数 |
+| `CUSTOM_PROXIES` | 空 | 逗号分隔的代理 URL，支持 HTTP、HTTPS、SOCKS5/SOCKS5H |
+| `CUSTOM_RETRIES` | `0` | 自定义代理重试数；`0` 表示按代理数量轮询一轮 |
+| `ZENPROXY_RELAY` | `https://zenproxy.top/api/relay` | ZenProxy relay 地址 |
+| `ZENPROXY_KEY` | 空 | ZenProxy API key；为空时跳过该层 |
+| `ZENPROXY_RETRIES` | `1` | ZenProxy 尝试次数 |
+| `FORCE_RELAY` | `0` | `1` 表示强制只走 ZenProxy |
+| `PROXY_PROBE_TIMEOUT` | `8000` | 代理探活超时，毫秒 |
+| `PROXY_REFRESH_MS` | `300000` | 公共候选池刷新间隔，毫秒 |
+| `PROXY_FIRST_BYTE_TIMEOUT` | `3000` | 单次尝试取得响应头的最大时间，毫秒 |
+| `HARD_TIMEOUT` | `10000` | 整个选择和重试链的总预算，毫秒 |
+| `TZ` | 系统默认 | 容器时区；镜像已包含 `tzdata` |
 
-### 代理模式
+当前生产使用的 `CUSTOM_PROXIES`、`GATEWAY_KEY`、重试次数和 ZenProxy 配置均可原样沿用。
 
-#### auto 模式（默认）
+## 重试规则
 
-从公共代理池自动获取 S 级代理，按槽位轮换：
+- 网络错误、连接/握手/首字节超时：关闭当前连接并切换代理。
+- `401`、`403`、`408`、`425`、`429`、`5xx`：允许重试。
+- 其他 `4xx`：视为业务请求错误，立即返回客户端。
+- 总预算耗尽：返回 `504`，并取消仍在进行的底层请求。
 
-```
-S级代理（SLOT_RETRIES 次，每次换一个槽位）
-    ↓ 全部失败
-ZenProxy（ZENPROXY_RETRIES 次，需配置 ZENPROXY_KEY）
-    ↓ 未配置或失败
-自定义代理（CUSTOM_RETRIES 次，按序轮询不拉黑）
-    ↓ 全部失败
-直连上游
-```
+## 本地开发
 
-#### custom 模式
-
-仅使用自定义代理，按序轮询不拉黑：
+需要 Go 1.24 或更高版本：
 
 ```bash
-# 使用 custom 模式，自定义代理轮询 10 次
-PROXY_MODE=custom CUSTOM_PROXIES=http://1.2.3.4:8080 CUSTOM_RETRIES=10 bun run gate.ts
+go test ./...
+PROXY_MODE=custom go run .
 ```
 
-```
-自定义代理（CUSTOM_RETRIES 次，按序轮询）
-    ↓ 全部失败
-ZenProxy（ZENPROXY_RETRIES 次，需配置 ZENPROXY_KEY）
-    ↓ 未配置或失败
-直连上游
-```
-
-### 网关认证
-
-设置 `GATEWAY_KEY` 后，客户端需要提供 Bearer Token：
+构建容器镜像：
 
 ```bash
-# 未设置 GATEWAY_KEY - 无需认证
-curl http://localhost:13339/openai/v1/models
-
-# 设置 GATEWAY_KEY=my-secret-key 后
-curl http://localhost:13339/openai/v1/models \
-  -H 'Authorization: Bearer my-secret-key'
+docker build -t kilocode-free-gate:local .
 ```
 
-### 关于 ZenProxy 备用通道
-
-主路径（免费代理池）失败时，自动回退到 ZenProxy 的 `/api/relay` 转发。回退触发条件：
-
-1. 启动时 `proxy.amux.ai` 拉不到代理
-2. 2 个 slot 全部失败，重试耗尽
-3. `FORCE_RELAY=1` 强制使用
-
-### 关于 ZenProxy 备用通道
-
-主路径（免费代理池）失败时，自动回退到 ZenProxy 的 `/api/relay` 转发。回退触发条件：
-
-1. 启动时 `proxy.amux.ai` 拉不到代理
-2. 2 个 slot 全部失败，重试耗尽
-3. `FORCE_RELAY=1` 强制使用
-
----
-
-## 依赖
-
-- [hpagent](https://github.com/delvedor/hpagent) — HTTP CONNECT 代理隧道
-- [socks-proxy-agent](https://github.com/TooTallNate/proxy-agents) — SOCKS5 代理
-
-Bun 会自动安装。
-
----
-
-## 与 opencode-free-gate 的区别
-
-| 特性 | opencode-free-gate | kilocode-free-gate |
-|------|-------------------|-------------------|
-| 上游 API | opencode.ai/zen | api.kilo.ai/api/gateway |
-| API Key | 需要 `authorization: Bearer public` | 不需要 |
-| 模型 | OpenCode 免费模型 | Kilo 免费模型 |
-| ZenProxy 备用 | 支持 | 不支持（Kilo 本身免费） |
-
----
-
-## 许可证
-
-MIT
+测试包含一个会接受 TCP 连接但永不返回数据的本地假代理，用于验证超时后连接确实被关闭。
