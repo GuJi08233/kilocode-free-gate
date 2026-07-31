@@ -52,7 +52,7 @@ func currentProject() projectSpec {
 			"/v1/messages":         {},
 		},
 		gatewayAuth:    true,
-		directFallback: false,
+		directFallback: true,
 		modelMode:      modelKilo,
 		ownedBy:        "kilocode",
 		specialModels: map[string]string{

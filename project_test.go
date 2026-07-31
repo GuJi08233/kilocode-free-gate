@@ -19,4 +19,7 @@ func TestKiloRoutes(t *testing.T) {
 	if !project.gatewayAuth {
 		t.Fatal("Kilo must preserve GATEWAY_KEY authentication")
 	}
+	if !project.directFallback {
+		t.Fatal("Kilo must try one direct request after proxy retries are exhausted")
+	}
 }
